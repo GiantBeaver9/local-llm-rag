@@ -1,0 +1,9 @@
+# The vector store is generated locally by `rag ingest`; don't commit it.
+store.json
+
+# Compiled binary
+/rag
+/rag.exe
+
+# Editor / OS noise
+.DS_Store
