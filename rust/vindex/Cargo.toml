@@ -1,0 +1,17 @@
+[package]
+name = "vindex"
+version = "0.1.0"
+edition = "2021"
+description = "A small vector similarity index exposed over a C ABI for Go to call via cgo."
+
+[lib]
+name = "vindex"
+# staticlib -> produces libvindex.a, a self-contained archive we link straight
+# into the Go binary. (The alternative, cdylib, makes a .so you'd have to ship
+# and locate at runtime; a static archive keeps everything in one executable.)
+crate-type = ["staticlib"]
+
+[profile.release]
+opt-level = 3
+lto = true          # let the optimizer inline across the whole crate
+codegen-units = 1   # slower build, faster code — fine for a small library

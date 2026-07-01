@@ -1,9 +1,12 @@
 # The vector store is generated locally by `rag ingest`; don't commit it.
 store.json
 
-# Compiled binary
+# Compiled Go binary
 /rag
 /rag.exe
+
+# Rust build artifacts (the compiled libvindex.a lives here)
+rust/vindex/target/
 
 # Editor / OS noise
 .DS_Store

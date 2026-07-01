@@ -26,6 +26,7 @@ import (
 
 	"github.com/giantbeaver9/local-llm-rag/internal/chunk"
 	"github.com/giantbeaver9/local-llm-rag/internal/lmstudio"
+	"github.com/giantbeaver9/local-llm-rag/internal/rustindex"
 	"github.com/giantbeaver9/local-llm-rag/internal/store"
 )
 
@@ -141,15 +142,22 @@ func runAsk(client *lmstudio.Client, storePath string, args []string) error {
 		return err
 	}
 
-	// 2. Retrieve the most relevant chunks.
+	// 2. Retrieve the most relevant chunks — using the RUST index.
+	//    We build the index from the persisted records (Go still owns loading
+	//    and JSON persistence; Rust owns the similarity math). Rust hands back
+	//    ids that map straight to db.Records because we add them in order.
 	const topK = 4
-	hits := db.Search(queryVec, topK)
+	hits, err := searchWithRust(db, queryVec, topK)
+	if err != nil {
+		return err
+	}
 
-	fmt.Println("retrieved context:")
+	fmt.Println("retrieved context (via Rust index):")
 	var contextBuilder strings.Builder
 	for rank, hit := range hits {
-		fmt.Printf("  [%d] %.3f  %s#%d\n", rank+1, hit.Score, hit.Record.Source, hit.Record.Index)
-		fmt.Fprintf(&contextBuilder, "[%d] %s\n\n", rank+1, hit.Record.Text)
+		record := db.Records[hit.ID]
+		fmt.Printf("  [%d] %.3f  %s#%d\n", rank+1, hit.Score, record.Source, record.Index)
+		fmt.Fprintf(&contextBuilder, "[%d] %s\n\n", rank+1, record.Text)
 	}
 
 	// 3. Build the prompt: a system instruction + the context + the question.
@@ -175,6 +183,38 @@ func runAsk(client *lmstudio.Client, storePath string, args []string) error {
 
 	fmt.Printf("\nanswer:\n%s\n", answer)
 	return nil
+}
+
+// searchWithRust loads every stored embedding into the Rust vector index and
+// runs the query through it. The Rust index owns its memory for the duration of
+// this call and is released by the deferred Close.
+//
+// (Go's own store.Search still exists in internal/store as a readable reference
+// implementation of the same cosine math — handy for comparing behaviour.)
+func searchWithRust(db *store.Store, query []float32, topK int) ([]rustindex.SearchHit, error) {
+	if len(db.Records) == 0 {
+		return nil, nil
+	}
+	dimensions := len(db.Records[0].Embedding)
+
+	index, err := rustindex.New(dimensions)
+	if err != nil {
+		return nil, err
+	}
+	defer index.Close()
+
+	for recordIndex, record := range db.Records {
+		if len(record.Embedding) != dimensions {
+			return nil, fmt.Errorf("record %d has %d dimensions, expected %d "+
+				"(was the store built with a different embedding model?)",
+				recordIndex, len(record.Embedding), dimensions)
+		}
+		if _, err := index.Add(record.Embedding); err != nil {
+			return nil, err
+		}
+	}
+
+	return index.Search(query, topK)
 }
 
 // gatherTextFiles returns every .txt/.md file at target. target may be a single
