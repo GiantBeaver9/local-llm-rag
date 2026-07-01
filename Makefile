@@ -35,4 +35,4 @@ test-go: $(RUST_LIB)
 
 clean:
 	cd $(RUST_DIR) && cargo clean
-	rm -f rag store.json
+	rm -f rag store.json store.index

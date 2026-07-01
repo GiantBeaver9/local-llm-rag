@@ -14,7 +14,8 @@
 //	LMSTUDIO_URL    default http://localhost:1234/v1
 //	EMBED_MODEL     default nomic-embed-text-v1.5
 //	CHAT_MODEL      default local-model
-//	RAG_STORE       default store.json   (where the vector DB is saved)
+//	RAG_STORE       default store.json    (text metadata: source + chunk text)
+//	RAG_INDEX       default store.index   (the Rust HNSW graph + vectors)
 package main
 
 import (
@@ -43,13 +44,14 @@ func main() {
 		env("CHAT_MODEL", "local-model"),
 	)
 	storePath := env("RAG_STORE", "store.json")
+	indexPath := env("RAG_INDEX", "store.index")
 
 	var err error
 	switch os.Args[1] {
 	case "ingest":
-		err = runIngest(client, storePath, os.Args[2:])
+		err = runIngest(client, storePath, indexPath, os.Args[2:])
 	case "ask":
-		err = runAsk(client, storePath, os.Args[2:])
+		err = runAsk(client, storePath, indexPath, os.Args[2:])
 	default:
 		usage()
 		os.Exit(1)
@@ -62,8 +64,11 @@ func main() {
 }
 
 // runIngest reads the given file or directory, splits everything into chunks,
-// embeds each chunk via LM Studio, and saves the growing vector store.
-func runIngest(client *lmstudio.Client, storePath string, args []string) error {
+// embeds each chunk via LM Studio, and appends them to BOTH persisted stores:
+// the text metadata (store.json) and the Rust HNSW index (store.index). HNSW
+// supports incremental insertion, so a second ingest grows the existing index
+// rather than rebuilding it.
+func runIngest(client *lmstudio.Client, storePath, indexPath string, args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: rag ingest <file-or-dir>")
 	}
@@ -79,6 +84,25 @@ func runIngest(client *lmstudio.Client, storePath string, args []string) error {
 
 	db, err := store.Load(storePath)
 	if err != nil {
+		return err
+	}
+
+	// Load the existing index if we have one; otherwise we create it lazily,
+	// once the first embedding tells us the vector dimensionality.
+	var index *rustindex.Index
+	if fileExists(indexPath) {
+		index, err = rustindex.Load(indexPath)
+		if err != nil {
+			return err
+		}
+	}
+	defer func() {
+		if index != nil {
+			index.Close()
+		}
+	}()
+
+	if err := ensureAligned(db, index); err != nil {
 		return err
 	}
 
@@ -100,27 +124,46 @@ func runIngest(client *lmstudio.Client, storePath string, args []string) error {
 			if err != nil {
 				return fmt.Errorf("embedding chunk %d of %s: %w", docChunk.Index, path, err)
 			}
+
+			// Create the index on the first vector we see.
+			if index == nil {
+				index, err = rustindex.New(len(embedding))
+				if err != nil {
+					return err
+				}
+			}
+
+			// Add to the Rust index and the metadata in lockstep so their
+			// positions stay aligned (index id N == db.Records[N]).
+			if _, err := index.Add(embedding); err != nil {
+				return err
+			}
 			db.Add(store.Record{
-				Source:    docChunk.Source,
-				Index:     docChunk.Index,
-				Text:      docChunk.Text,
-				Embedding: embedding,
+				Source: docChunk.Source,
+				Index:  docChunk.Index,
+				Text:   docChunk.Text,
 			})
 			totalChunks++
 		}
 	}
 
+	// Persist both stores. (An interrupted ingest could leave these out of
+	// sync; the ensureAligned check above catches that on the next run.)
+	if err := index.Save(indexPath); err != nil {
+		return err
+	}
 	if err := db.Save(storePath); err != nil {
 		return err
 	}
-	fmt.Printf("\nembedded %d chunks; store now holds %d records -> %s\n",
-		totalChunks, db.Len(), storePath)
+	fmt.Printf("\nembedded %d chunks; index now holds %d vectors -> %s + %s\n",
+		totalChunks, db.Len(), indexPath, storePath)
 	return nil
 }
 
 // runAsk embeds the user's question, finds the most similar chunks, and asks
-// the chat model to answer using only those chunks as context.
-func runAsk(client *lmstudio.Client, storePath string, args []string) error {
+// the chat model to answer using only those chunks as context. It LOADS the
+// persisted Rust index — no rebuilding — which is the whole point of Phase 3.
+func runAsk(client *lmstudio.Client, storePath, indexPath string, args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: rag ask \"your question\"")
 	}
@@ -131,7 +174,21 @@ func runAsk(client *lmstudio.Client, storePath string, args []string) error {
 		return err
 	}
 	if db.Len() == 0 {
-		return fmt.Errorf("the store is empty — run `rag ingest <path>` first")
+		return fmt.Errorf("nothing indexed yet — run `rag ingest <path>` first")
+	}
+	if !fileExists(indexPath) {
+		return fmt.Errorf("index file %q not found — run `rag ingest <path>` first", indexPath)
+	}
+
+	// Load the prebuilt HNSW graph straight off disk.
+	index, err := rustindex.Load(indexPath)
+	if err != nil {
+		return err
+	}
+	defer index.Close()
+
+	if err := ensureAligned(db, index); err != nil {
+		return err
 	}
 
 	ctx := context.Background()
@@ -142,17 +199,15 @@ func runAsk(client *lmstudio.Client, storePath string, args []string) error {
 		return err
 	}
 
-	// 2. Retrieve the most relevant chunks — using the RUST index.
-	//    We build the index from the persisted records (Go still owns loading
-	//    and JSON persistence; Rust owns the similarity math). Rust hands back
-	//    ids that map straight to db.Records because we add them in order.
+	// 2. Retrieve the most relevant chunks from the loaded Rust index. The ids
+	//    it returns index straight into db.Records (they were built in lockstep).
 	const topK = 4
-	hits, err := searchWithRust(db, queryVec, topK)
+	hits, err := index.Search(queryVec, topK)
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("retrieved context (via Rust index):")
+	fmt.Println("retrieved context (via Rust HNSW index):")
 	var contextBuilder strings.Builder
 	for rank, hit := range hits {
 		record := db.Records[hit.ID]
@@ -185,36 +240,27 @@ func runAsk(client *lmstudio.Client, storePath string, args []string) error {
 	return nil
 }
 
-// searchWithRust loads every stored embedding into the Rust vector index and
-// runs the query through it. The Rust index owns its memory for the duration of
-// this call and is released by the deferred Close.
-//
-// (Go's own store.Search still exists in internal/store as a readable reference
-// implementation of the same cosine math — handy for comparing behaviour.)
-func searchWithRust(db *store.Store, query []float32, topK int) ([]rustindex.SearchHit, error) {
-	if len(db.Records) == 0 {
-		return nil, nil
+// ensureAligned checks that the metadata store and the Rust index hold the same
+// number of entries. They must stay in lockstep because a search result's id is
+// used as an index into db.Records; a mismatch means the two files drifted
+// (e.g. an interrupted ingest) and the safest fix is to rebuild from scratch.
+func ensureAligned(db *store.Store, index *rustindex.Index) error {
+	if index == nil {
+		return nil // no index yet (first ingest)
 	}
-	dimensions := len(db.Records[0].Embedding)
-
-	index, err := rustindex.New(dimensions)
-	if err != nil {
-		return nil, err
+	if db.Len() != index.Len() {
+		return fmt.Errorf(
+			"metadata (%d records) and index (%d vectors) are out of sync; "+
+				"delete both store files and re-ingest to rebuild",
+			db.Len(), index.Len())
 	}
-	defer index.Close()
+	return nil
+}
 
-	for recordIndex, record := range db.Records {
-		if len(record.Embedding) != dimensions {
-			return nil, fmt.Errorf("record %d has %d dimensions, expected %d "+
-				"(was the store built with a different embedding model?)",
-				recordIndex, len(record.Embedding), dimensions)
-		}
-		if _, err := index.Add(record.Embedding); err != nil {
-			return nil, err
-		}
-	}
-
-	return index.Search(query, topK)
+// fileExists reports whether path refers to an existing file.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // gatherTextFiles returns every .txt/.md file at target. target may be a single
@@ -265,6 +311,7 @@ environment (all optional):
   LMSTUDIO_URL   default http://localhost:1234/v1
   EMBED_MODEL    default nomic-embed-text-v1.5
   CHAT_MODEL     default local-model
-  RAG_STORE      default store.json
+  RAG_STORE      default store.json   (text metadata)
+  RAG_INDEX      default store.index  (Rust HNSW graph)
 `)
 }

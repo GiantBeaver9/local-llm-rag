@@ -1,5 +1,6 @@
-# The vector store is generated locally by `rag ingest`; don't commit it.
+# Generated locally by `rag ingest`; don't commit them.
 store.json
+store.index
 
 # Compiled Go binary
 /rag

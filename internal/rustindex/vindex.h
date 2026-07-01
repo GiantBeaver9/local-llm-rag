@@ -30,6 +30,9 @@ int64_t vindex_add(VectorIndex *index, const float *vector, size_t length);
 /* Number of vectors stored. */
 size_t vindex_len(const VectorIndex *index);
 
+/* Dimensionality the index was created with (used after loading from disk). */
+size_t vindex_dimensions(const VectorIndex *index);
+
 /*
  * Find the top_k most similar vectors to `query`. Writes ids and scores into
  * the caller-owned out_ids / out_scores arrays (each must hold >= top_k
@@ -38,5 +41,11 @@ size_t vindex_len(const VectorIndex *index);
 size_t vindex_search(const VectorIndex *index, const float *query,
                      size_t query_length, size_t top_k, int32_t *out_ids,
                      float *out_scores);
+
+/* Save the index to a file. Returns 0 on success, negative on error. */
+int32_t vindex_save(const VectorIndex *index, const char *path);
+
+/* Load an index from a file. Returns NULL on error; free it with vindex_free. */
+VectorIndex *vindex_load(const char *path);
 
 #endif /* VINDEX_H */

@@ -25,6 +25,7 @@ package rustindex
 #cgo CFLAGS: -I${SRCDIR}
 #cgo LDFLAGS: ${SRCDIR}/../../rust/vindex/target/release/libvindex.a -lm -ldl -lpthread
 
+#include <stdlib.h>
 #include "vindex.h"
 */
 import "C"
@@ -78,6 +79,41 @@ func (index *Index) Add(vector []float32) (int, error) {
 // Len reports how many vectors are stored.
 func (index *Index) Len() int {
 	return int(C.vindex_len(index.handle))
+}
+
+// Dimensions reports the vector length this index was built for.
+func (index *Index) Dimensions() int {
+	return index.dimensions
+}
+
+// Save writes the whole index (vectors + HNSW graph) to path so it can be
+// reloaded later without rebuilding.
+func (index *Index) Save(path string) error {
+	// C.CString allocates C memory that we must free ourselves — Go's GC
+	// doesn't manage it. defer C.free keeps that allocation balanced.
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	if code := C.vindex_save(index.handle, cPath); code != 0 {
+		return fmt.Errorf("rustindex: saving index to %q failed (code %d)", path, int(code))
+	}
+	return nil
+}
+
+// Load reads an index previously written by Save. The returned Index owns
+// Rust-side memory; call Close when done.
+func Load(path string) (*Index, error) {
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	handle := C.vindex_load(cPath)
+	if handle == nil {
+		return nil, fmt.Errorf("rustindex: could not load index from %q", path)
+	}
+	return &Index{
+		handle:     handle,
+		dimensions: int(C.vindex_dimensions(handle)),
+	}, nil
 }
 
 // SearchHit is one result: the id of a stored vector and its similarity score.
