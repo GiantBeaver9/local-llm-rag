@@ -40,13 +40,13 @@ func New() *Store {
 }
 
 // Add appends a record.
-func (s *Store) Add(r Record) {
-	s.Records = append(s.Records, r)
+func (store *Store) Add(record Record) {
+	store.Records = append(store.Records, record)
 }
 
 // Len reports how many records are stored.
-func (s *Store) Len() int {
-	return len(s.Records)
+func (store *Store) Len() int {
+	return len(store.Records)
 }
 
 // Result is one search hit: the record and how similar it was to the query.
@@ -56,18 +56,18 @@ type Result struct {
 }
 
 // Search returns the topK records most similar to the query vector, best first.
-func (s *Store) Search(query []float32, topK int) []Result {
-	results := make([]Result, 0, len(s.Records))
-	for _, r := range s.Records {
+func (store *Store) Search(query []float32, topK int) []Result {
+	results := make([]Result, 0, len(store.Records))
+	for _, record := range store.Records {
 		results = append(results, Result{
-			Record: r,
-			Score:  cosineSimilarity(query, r.Embedding),
+			Record: record,
+			Score:  cosineSimilarity(query, record.Embedding),
 		})
 	}
 
 	// Sort by score, highest first.
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
+	sort.Slice(results, func(left, right int) bool {
+		return results[left].Score > results[right].Score
 	})
 
 	if topK < len(results) {
@@ -76,34 +76,39 @@ func (s *Store) Search(query []float32, topK int) []Result {
 	return results
 }
 
-// cosineSimilarity computes the cosine of the angle between vectors a and b.
+// cosineSimilarity computes the cosine of the angle between vectors vecA and
+// vecB.
 //
-//	cos = (a · b) / (|a| * |b|)
+//	cos = (vecA · vecB) / (|vecA| * |vecB|)
 //
-// where a·b is the dot product and |a| is the vector's length (magnitude).
-// If either vector has zero length (shouldn't happen with real embeddings) we
-// return 0 to avoid dividing by zero.
-func cosineSimilarity(a, b []float32) float32 {
-	if len(a) != len(b) {
+// where vecA·vecB is the dot product and |vecA| is the vector's length
+// (magnitude). If either vector has zero length (shouldn't happen with real
+// embeddings) we return 0 to avoid dividing by zero.
+//
+// Note the accumulators are float64 even though the inputs are float32: summing
+// thousands of tiny float32 products lets rounding error pile up, so we keep the
+// running totals in a wider type and narrow back only at the very end.
+func cosineSimilarity(vecA, vecB []float32) float32 {
+	if len(vecA) != len(vecB) {
 		return 0
 	}
-	var dot, magA, magB float64
-	for i := range a {
-		dot += float64(a[i]) * float64(b[i])
-		magA += float64(a[i]) * float64(a[i])
-		magB += float64(b[i]) * float64(b[i])
+	var dotProduct, magnitudeA, magnitudeB float64
+	for dim := range vecA {
+		dotProduct += float64(vecA[dim]) * float64(vecB[dim])
+		magnitudeA += float64(vecA[dim]) * float64(vecA[dim])
+		magnitudeB += float64(vecB[dim]) * float64(vecB[dim])
 	}
-	if magA == 0 || magB == 0 {
+	if magnitudeA == 0 || magnitudeB == 0 {
 		return 0
 	}
-	return float32(dot / (math.Sqrt(magA) * math.Sqrt(magB)))
+	return float32(dotProduct / (math.Sqrt(magnitudeA) * math.Sqrt(magnitudeB)))
 }
 
 // ---- persistence ----------------------------------------------------------
 
 // Save writes the whole store to a JSON file.
-func (s *Store) Save(path string) error {
-	data, err := json.MarshalIndent(s, "", "  ")
+func (store *Store) Save(path string) error {
+	data, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -123,9 +128,9 @@ func Load(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading store from %s: %w", path, err)
 	}
-	var s Store
-	if err := json.Unmarshal(data, &s); err != nil {
+	var loaded Store
+	if err := json.Unmarshal(data, &loaded); err != nil {
 		return nil, fmt.Errorf("parsing store file %s: %w", path, err)
 	}
-	return &s, nil
+	return &loaded, nil
 }

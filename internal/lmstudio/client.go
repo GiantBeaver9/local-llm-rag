@@ -28,7 +28,7 @@ type Client struct {
 	BaseURL    string // e.g. "http://localhost:1234/v1"
 	EmbedModel string // the embedding model loaded in LM Studio
 	ChatModel  string // the chat model loaded in LM Studio
-	http       *http.Client
+	httpClient *http.Client
 }
 
 // New builds a Client. We give it a generous timeout because local models can
@@ -38,7 +38,7 @@ func New(baseURL, embedModel, chatModel string) *Client {
 		BaseURL:    baseURL,
 		EmbedModel: embedModel,
 		ChatModel:  chatModel,
-		http:       &http.Client{Timeout: 120 * time.Second},
+		httpClient: &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -59,19 +59,19 @@ type embedResponse struct {
 
 // Embed converts a single piece of text into a vector of numbers. Similar text
 // produces similar vectors — that's the whole magic that makes search work.
-func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
-	body, err := json.Marshal(embedRequest{Model: c.EmbedModel, Input: text})
+func (client *Client) Embed(ctx context.Context, text string) ([]float32, error) {
+	body, err := json.Marshal(embedRequest{Model: client.EmbedModel, Input: text})
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := c.post(ctx, "/embeddings", body)
+	response, err := client.post(ctx, "/embeddings", body)
 	if err != nil {
 		return nil, err
 	}
 
 	var parsed embedResponse
-	if err := json.Unmarshal(resp, &parsed); err != nil {
+	if err := json.Unmarshal(response, &parsed); err != nil {
 		return nil, fmt.Errorf("decoding embedding response: %w", err)
 	}
 	if len(parsed.Data) == 0 || len(parsed.Data[0].Embedding) == 0 {
@@ -103,9 +103,9 @@ type chatResponse struct {
 
 // Chat sends a list of messages to the chat model and returns its reply text.
 // A low temperature keeps answers focused and factual — good for RAG.
-func (c *Client) Chat(ctx context.Context, messages []Message) (string, error) {
+func (client *Client) Chat(ctx context.Context, messages []Message) (string, error) {
 	body, err := json.Marshal(chatRequest{
-		Model:       c.ChatModel,
+		Model:       client.ChatModel,
 		Messages:    messages,
 		Temperature: 0.2,
 	})
@@ -113,13 +113,13 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (string, error) {
 		return "", err
 	}
 
-	resp, err := c.post(ctx, "/chat/completions", body)
+	response, err := client.post(ctx, "/chat/completions", body)
 	if err != nil {
 		return "", err
 	}
 
 	var parsed chatResponse
-	if err := json.Unmarshal(resp, &parsed); err != nil {
+	if err := json.Unmarshal(response, &parsed); err != nil {
 		return "", fmt.Errorf("decoding chat response: %w", err)
 	}
 	if len(parsed.Choices) == 0 {
@@ -133,28 +133,28 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (string, error) {
 // post sends a JSON body to BaseURL+path and returns the raw response bytes.
 // It turns connection failures into a friendly, actionable message — because
 // "connection refused" is the #1 thing you'll hit while learning.
-func (c *Client) post(ctx context.Context, path string, body []byte) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(body))
+func (client *Client) post(ctx context.Context, path string, body []byte) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.BaseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+	response, err := client.httpClient.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"could not reach LM Studio at %s\n"+
 				"  -> Is LM Studio running with the local server started? (Developer tab -> Start Server)\n"+
-				"  -> underlying error: %w", c.BaseURL, err)
+				"  -> underlying error: %w", client.BaseURL, err)
 	}
-	defer resp.Body.Close()
+	defer response.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	responseBody, err := io.ReadAll(response.Body)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("LM Studio returned HTTP %d: %s", resp.StatusCode, string(data))
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("LM Studio returned HTTP %d: %s", response.StatusCode, string(responseBody))
 	}
-	return data, nil
+	return responseBody, nil
 }

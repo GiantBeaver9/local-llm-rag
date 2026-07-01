@@ -94,16 +94,16 @@ func runIngest(client *lmstudio.Client, storePath string, args []string) error {
 		chunks := chunk.Split(path, string(raw), 200, 40)
 		fmt.Printf("%-40s %d chunks\n", path, len(chunks))
 
-		for _, c := range chunks {
-			vec, err := client.Embed(ctx, c.Text)
+		for _, docChunk := range chunks {
+			embedding, err := client.Embed(ctx, docChunk.Text)
 			if err != nil {
-				return fmt.Errorf("embedding chunk %d of %s: %w", c.Index, path, err)
+				return fmt.Errorf("embedding chunk %d of %s: %w", docChunk.Index, path, err)
 			}
 			db.Add(store.Record{
-				Source:    c.Source,
-				Index:     c.Index,
-				Text:      c.Text,
-				Embedding: vec,
+				Source:    docChunk.Source,
+				Index:     docChunk.Index,
+				Text:      docChunk.Text,
+				Embedding: embedding,
 			})
 			totalChunks++
 		}
@@ -147,9 +147,9 @@ func runAsk(client *lmstudio.Client, storePath string, args []string) error {
 
 	fmt.Println("retrieved context:")
 	var contextBuilder strings.Builder
-	for i, h := range hits {
-		fmt.Printf("  [%d] %.3f  %s#%d\n", i+1, h.Score, h.Record.Source, h.Record.Index)
-		fmt.Fprintf(&contextBuilder, "[%d] %s\n\n", i+1, h.Record.Text)
+	for rank, hit := range hits {
+		fmt.Printf("  [%d] %.3f  %s#%d\n", rank+1, hit.Score, hit.Record.Source, hit.Record.Index)
+		fmt.Fprintf(&contextBuilder, "[%d] %s\n\n", rank+1, hit.Record.Text)
 	}
 
 	// 3. Build the prompt: a system instruction + the context + the question.
@@ -190,11 +190,11 @@ func gatherTextFiles(target string) ([]string, error) {
 	}
 
 	var files []string
-	err = filepath.WalkDir(target, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(target, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
+		if entry.IsDir() {
 			return nil
 		}
 		switch strings.ToLower(filepath.Ext(path)) {
@@ -208,8 +208,8 @@ func gatherTextFiles(target string) ([]string, error) {
 
 // env returns the value of an environment variable, or a fallback if unset.
 func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
 	return fallback
 }

@@ -39,17 +39,18 @@ func Split(source, text string, chunkWords, overlapWords int) []Chunk {
 	}
 
 	var chunks []Chunk
-	step := chunkWords - overlapWords // how far we advance each iteration
+	wordsPerStep := chunkWords - overlapWords // how far we advance each iteration
+	chunkIndex := 0
 
-	for start, i := 0, 0; start < len(words); start += step {
+	for start := 0; start < len(words); start += wordsPerStep {
 		end := start + chunkWords
 		if end > len(words) {
 			end = len(words)
 		}
 
-		piece := strings.Join(words[start:end], " ")
-		chunks = append(chunks, Chunk{Source: source, Index: i, Text: piece})
-		i++
+		passage := strings.Join(words[start:end], " ")
+		chunks = append(chunks, Chunk{Source: source, Index: chunkIndex, Text: passage})
+		chunkIndex++
 
 		if end == len(words) {
 			break // we've consumed everything
